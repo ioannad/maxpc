@@ -315,3 +315,249 @@
     (multiple-value-bind (rest value) (funcall parser input)
       (when rest
         (values rest (funcall function value) t)))))
+
+;; backtracking primitives
+
+(defvar *debug-plus* NIL)
+
+;; Parsers up to now return two (three) values (rest, value, value-present-p),
+;; Backtracking combinators extend this "signature" by returning four values, 
+;; the fourth being the lazy sequence of other possible successful parses.
+
+
+
+(defmacro with-debug-parser (form)
+  `(multiple-value-bind (rest value value-p more)
+       ,form
+     (check-type rest (not function))
+     (check-type more (or function null))
+     (values rest value value-p more)))
+
+(defun ?plus (a b) ; a, b are parsers
+  "Primitive backtracking parser combinator. Parses with A, and if that succeeds, 
+parses the rest input with B. If that also succeeds it returns the remaining input,
+nil nil more) where more at this point contains the calls to the parsers and the 
+sequence logic."
+  (lambda (input)
+    (let (a_more b_more more _1 _2)
+      (declare (ignorable _1 _2))
+      (setf a_more (lambda () (with-debug-parser
+				  (funcall a input))))
+      (setf more   (lambda ()
+                     (cond (b_more
+			    (let (rest)
+			      (setf (values rest _1 _2 b_more)
+				    (funcall b_more))
+			      (if rest
+				  (values rest nil nil more)
+				  (funcall more))))
+			   (a_more
+			    (let (suffix)
+			      (setf (values suffix _1 _2 a_more)
+				    (with-debug-parser (funcall a_more)))
+			      (when suffix
+				(setf b_more
+				      (lambda ()
+					(with-debug-parser
+					    (funcall b suffix))))
+				    (funcall more)))))))
+      (funcall more))))
+
+(defun ?alternate (x y)
+  (lambda (s)
+    (let (x_more more)
+      (setf x_more (lambda ()
+                     (with-debug-parser (funcall x s)))
+            more (lambda ()
+                   (let (rest _1 _2)
+		     (declare (ignorable _1 _2))
+                     (when x_more 
+                       (setf (values rest _1 _2 x_more)
+                             (funcall x_more)))
+		     (if rest 
+                         (with-debug-parser (values rest nil nil more))
+                         (with-debug-parser (funcall y s))))))
+      (funcall more))))
+
+(defun ?optional (parser)
+  (?alternate parser (?seq)))
+
+(defun insert (list end-piece)
+  (append list (list end-piece)))
+
+(defun ?range (parser &optional (min nil) (max nil))
+  (lambda (s)
+    (let (rests)
+      (loop 
+	 while (and s (or (not max) 
+			  (<= (length rests) max)))
+	 do (setf rests (insert rests s)) ;; insert at end
+	 do (setf s (funcall parser s)))
+      (let (more)
+	(setf more (lambda ()
+		     (let ((rest (first (last rests))))
+		       ; pop rest from end of rests
+		       (setf rests (butlast rests))
+		       (when (and rest 
+				  (or (not min) 
+				      (>= (length rests) min)))
+			 (values rest nil nil more)))))
+	(funcall more)))))
+
+(defun ?all (parser)
+  (?range parser 0))
+
+(defun ?one_or_more (parser)
+  (?plus parser (?all parser)))
+
+(defun make-reducer (combinator sentinel)
+  "Returns a function which reduces a list of parsers by combining
+them with the COMBINATOR."
+  (labels ((reduce% (parsers)
+             (case (length parsers)
+               (0 sentinel)
+               (1 (first parsers))
+               (otherwise (let ((head (first parsers))
+                                (tail (reduce% (rest parsers))))
+                            (funcall combinator head tail))))))
+    (lambda (&rest parsers)
+      (reduce% parsers))))
+                    
+(setf (symbol-function '?path)
+      (make-reducer '?plus 'identity))
+
+(defun constantly_nil () nil)
+
+(setf (symbol-function '?either)
+      (make-reducer '?alternate 'constantly_nil))
+
+;; TEST GOAL: BACKTRACKING TESTS
+
+(defun test-backtracking ()
+  (multiple-value-bind (result matched end)
+      (parse "0aaaaaaaa1"
+	     (?path (?eq #\0)
+		    (?all (?satisfies 'alphanumericp))
+		    (?eq #\1)))
+    (assert (null result))
+    (assert matched)
+    (assert end))
+
+  (multiple-value-bind (result matched end)
+      (parse "a"
+	     (?either (?eq #\a)
+		      (?eq #\b)))
+    (assert (null result))
+    (assert matched)
+    (assert end))
+
+  (multiple-value-bind (result matched end)
+      (parse "b"
+	     (?either (?eq #\a)
+		      (?eq #\b)))
+    (assert (null result))
+    (assert matched)
+    (assert end))
+  
+  (multiple-value-bind (result matched end)
+      (parse "."
+	     (?optional (?eq #\.)))
+    (assert (null result))
+    (assert matched)
+    (assert end))
+  
+  (multiple-value-bind (result matched end)
+      (parse ""
+	     (?optional (?eq ".")))
+    (assert (null result))
+    (assert matched)
+    (assert end))
+
+  (flet ((domain-like ()
+	   (?either
+	    (?path
+	     (?path
+	      (?all (?path (?all (?satisfies 'alphanumericp))
+			   (%diff (?satisfies 'alphanumericp)
+				  (?satisfies 'digit-char-p))
+			   (?eq #\.))))
+	     (?path (?all (?satisfies 'alphanumericp))
+		    (%diff (?satisfies 'alphanumericp)
+			   (?satisfies 'digit-char-p))
+		    (?optional (?eq #\.)))
+	     (?end))
+	    (?seq (?eq #\.) (?end)))))
+    
+    (multiple-value-bind (result matched end)
+	(parse "."
+	       (domain-like))
+      (assert (null result))
+      (assert matched)
+      (assert end))
+  
+  (multiple-value-bind (result matched end)
+	(parse "foo."
+	       (domain-like))
+      (assert (null result))
+      (assert matched)
+      (assert end))
+
+  (multiple-value-bind (result matched end)
+      (parse "1foo.bar"
+	     (domain-like))
+    (assert (null result))
+    (assert matched)
+    (assert end))
+
+  (multiple-value-bind (result matched end)
+	(parse "foo.b2ar.baz"
+	       (domain-like))
+      (assert (null result))
+      (assert matched)
+      (assert end))
+
+  (multiple-value-bind (result matched end)
+      (parse "foo.bar.2baz."
+	     (domain-like))
+    (assert (null result))
+    (assert matched)
+    (assert end))
+
+  (multiple-value-bind (result matched end)
+	(parse "foo2"
+	       (domain-like))
+      (assert (null result))
+      (assert (null matched))
+      (assert (null end)))
+
+  (multiple-value-bind (result matched end)
+	(parse ".."
+	       (domain-like))
+      (assert (null result))
+      (assert (null matched))
+      (assert (null end)))
+
+  (multiple-value-bind (result matched end)
+	(parse "123.456"
+	       (domain-like))
+      (assert (null result))
+      (assert (null matched))
+      (assert (null end)))))
+
+
+;; debugging - delete eventually
+
+(defun domain-like ()
+  (?either
+   (?path
+    (?path
+     (?all (?path (?all (?satisfies 'alphanumericp))
+		  (%diff (?satisfies 'alphanumericp)
+			 (?satisfies 'digit-char-p))
+		  (?eq #\.))))
+    (?path (?all (?satisfies 'alphanumericp))
+	   (%diff (?satisfies 'alphanumericp)
+		  (?satisfies 'digit-char-p))
+	   (?optional (?eq #\.)))
+    (?end))
+   (?seq (?eq #\.) (?end))))
