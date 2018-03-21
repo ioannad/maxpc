@@ -318,8 +318,6 @@
 
 ;; backtracking primitives
 
-(defvar *debug-plus* NIL)
-
 ;; Parsers up to now return two (three) values (rest, value, value-present-p),
 ;; Backtracking combinators extend this "signature" by returning four values, 
 ;; the fourth being the lazy sequence of other possible successful parses.
@@ -339,29 +337,29 @@ parses the rest input with B. If that also succeeds it returns the remaining inp
 nil nil more) where more at this point contains the calls to the parsers and the 
 sequence logic."
   (lambda (input)
-    (let (a_more b_more more _1 _2)
+    (let ((a_more (lambda () (with-debug-parser
+				 (funcall a input))))
+	  b_more _1 _2)
       (declare (ignorable _1 _2))
-      (setf a_more (lambda () (with-debug-parser
-				  (funcall a input))))
-      (setf more   (lambda ()
-                     (cond (b_more
-			    (let (rest)
-			      (setf (values rest _1 _2 b_more)
-				    (funcall b_more))
-			      (if rest
-				  (values rest nil nil more)
-				  (funcall more))))
-			   (a_more
-			    (let (suffix)
-			      (setf (values suffix _1 _2 a_more)
-				    (with-debug-parser (funcall a_more)))
-			      (when suffix
-				(setf b_more
-				      (lambda ()
-					(with-debug-parser
-					    (funcall b suffix))))
-				    (funcall more)))))))
-      (funcall more))))
+      (labels ((more ()
+		 (cond (b_more
+			(let (rest)
+			  (setf (values rest _1 _2 b_more)
+				(funcall b_more))
+			  (if rest
+			      (values rest nil nil #'more)
+			      (more))))
+		       (a_more
+			(let (suffix)
+			  (setf (values suffix _1 _2 a_more)
+				(with-debug-parser (funcall a_more)))
+			  (when suffix
+			    (setf b_more
+				  (lambda ()
+				    (with-debug-parser
+					(funcall b suffix))))
+			    (more)))))))
+	(more)))))
 
 (defun ?alternate (x y)
   (lambda (s)
