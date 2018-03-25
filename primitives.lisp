@@ -322,60 +322,40 @@
 ;; Backtracking combinators extend this "signature" by returning four values, 
 ;; the fourth being the lazy sequence of other possible successful parses.
 
-
-
-(defmacro with-debug-parser (form)
-  `(multiple-value-bind (rest value value-p more)
-       ,form
-     (check-type rest (not function))
-     (check-type more (or function null))
-     (values rest value value-p more)))
-
 (defun ?plus (a b) ; a, b are parsers
   "Primitive backtracking parser combinator. Parses with A, and if that succeeds, 
 parses the rest input with B. If that also succeeds it returns the remaining input,
 nil nil more) where more at this point contains the calls to the parsers and the 
 sequence logic."
   (lambda (input)
-    (let ((a_more (lambda () (with-debug-parser
-				 (funcall a input))))
-	  b_more _1 _2)
-      (declare (ignorable _1 _2))
+    (let ((a-more (lambda () (funcall a input)))
+	  b-more suffix rest a-value a-result-p b-value b-result-p)
+      (declare (ignorable a-value a-result-p b-value b-result-p))
       (labels ((more ()
-		 (cond (b_more
-			(let (rest)
-			  (setf (values rest _1 _2 b_more)
-				(funcall b_more))
-			  (if rest
-			      (values rest nil nil #'more)
-			      (more))))
-		       (a_more
-			(let (suffix)
-			  (setf (values suffix _1 _2 a_more)
-				(with-debug-parser (funcall a_more)))
-			  (when suffix
-			    (setf b_more
-				  (lambda ()
-				    (with-debug-parser
-					(funcall b suffix))))
-			    (more)))))))
+		 (when a-more
+		   (setf (values suffix a-value a-result-p a-more)
+			 (funcall a-more))
+		   (when suffix 
+		     (setf b-more (lambda () (funcall b suffix)))
+		     (setf (values rest b-value b-result-p b-more)
+			   (funcall b-more))
+		     (if rest
+			 (values rest nil nil #'more)
+			 (more))))))
 	(more)))))
 
 (defun ?alternate (x y)
   (lambda (s)
-    (let (x_more more)
-      (setf x_more (lambda ()
-                     (with-debug-parser (funcall x s)))
-            more (lambda ()
-                   (let (rest _1 _2)
-		     (declare (ignorable _1 _2))
-                     (when x_more 
-                       (setf (values rest _1 _2 x_more)
-                             (funcall x_more)))
+    (let ((x-more (lambda () (funcall x s))))
+      (labels ((more ()
+		 (let (rest value result-p)
+		   (when x-more 
+		     (setf (values rest value result-p x-more)
+			   (funcall x-more))
 		     (if rest 
-                         (with-debug-parser (values rest nil nil more))
-                         (with-debug-parser (funcall y s))))))
-      (funcall more))))
+			 (values rest value result-p #'more)
+			 (funcall y s))))))
+	(more)))))
 
 (defun ?optional (parser)
   (?alternate parser (?seq)))
